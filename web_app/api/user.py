@@ -23,6 +23,28 @@ user_db = UserDBConnector()
 
 position_db = PositionDBConnector()
 
+@router.get(
+    "/api/has-user-opened-position",
+    tags=["Position Operations"],
+    summary="Check if user has opened position",
+    response_description="Returns true if the user has an opened position, false otherwise",
+)
+async def has_user_opened_position(wallet_id: str) -> dict:
+    """
+    Check if a user has any opened positions.
+    :param wallet_id: wallet id
+    :return: Dict containing boolean result
+    :raises: HTTPException
+    """
+    try:
+        has_position = position_db.has_opened_position(wallet_id)
+        return {"has_opened_position": has_position}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error checking position status: {str(e)}"
+        )
+
 
 @router.get(
     "/api/get-user-contract",

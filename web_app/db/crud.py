@@ -241,187 +241,210 @@ class PositionDBConnector(UserDBConnector):
         """
         return self.get_user_by_wallet_id(wallet_id)
 
-    def get_positions_by_wallet_id(self, wallet_id: str) -> list:
+    def has_opened_position(self, wallet_id: str) -> bool:
         """
-        Retrieves all positions for a user by their wallet ID
-        and returns them as a list of dictionaries.
+        Checks if a user has any opened positions.
         :param wallet_id: str
-        :return: list of dict
+        :return: bool
         """
         with self.Session() as db:
             user = self._get_user_by_wallet_id(wallet_id)
-            if not user:
-                return []
-
             try:
-                positions = (
+                position_exists = (
                     db.query(Position)
                     .filter(
                         Position.user_id == user.id,
                         Position.status == Status.OPENED.value,
                     )
-                    .all()
+                    .first() is not None
                 )
-
-                # Convert positions to a list of dictionaries
-                positions_dict = [
-                    self._position_to_dict(position) for position in positions
-                ]
-                return positions_dict
+                return position_exists
 
             except SQLAlchemyError as e:
-                logger.error(f"Failed to retrieve positions: {str(e)}")
-                return []
+                logger.error(f"Failed to check for opened positions: {str(e)}")
+                return False
 
-    def create_position(
-        self, wallet_id: str, token_symbol: str, amount: str, multiplier: int
-    ) -> Position:
-        """
-        Creates a new position in the database if it does not already exist for the wallet.
-        If a position with status 'pending' exists, update its values.
-        :param wallet_id: str
-        :param token_symbol: str
-        :param amount: str
-        :param multiplier: int
-        :return: Position
-        """
-        user = self._get_user_by_wallet_id(wallet_id)
-        if not user:
-            logger.error(f"User with wallet ID {wallet_id} not found")
-            return None
+        def get_positions_by_wallet_id(self, wallet_id: str) -> list:
+            """
+            Retrieves all positions for a user by their wallet ID
+            and returns them as a list of dictionaries.
+            :param wallet_id: str
+            :return: list of dict
+            """
+            with self.Session() as db:
+                user = self._get_user_by_wallet_id(wallet_id)
+                if not user:
+                    return []
 
-        # Check if a position with status 'pending' already exists for this user
-        with self.Session() as session:
-            existing_position = (
-                session.query(Position)
-                .filter(
-                    Position.user_id == user.id, Position.status == Status.PENDING.value
-                )
-                .one_or_none()
-            )
-
-            # If a pending position exists, update its values
-            if existing_position:
-                existing_position.token_symbol = token_symbol
-                existing_position.amount = amount
-                existing_position.multiplier = multiplier
-                existing_position.start_price = PositionDBConnector.START_PRICE
-                session.commit()  # Commit the changes to the database
-                session.refresh(existing_position)  # Refresh to get updated values
-                return existing_position
-
-            # Create a new position since none with 'pending' status exists
-            position = Position(
-                user_id=user.id,
-                token_symbol=token_symbol,
-                amount=amount,
-                multiplier=multiplier,
-                status=Status.PENDING.value,  # Set status as 'pending' by default
-                start_price=PositionDBConnector.START_PRICE,
-            )
-
-            # Write the new position to the database
-            position = self.write_to_db(position)
-            return position
-
-    def get_position_id_by_wallet_id(self, wallet_id: str) -> str | None:
-        """
-        Retrieves the position ID by the wallet ID.
-        :param wallet_id: wallet ID
-        :return: Position ID
-        """
-        position = self.get_positions_by_wallet_id(wallet_id)
-        if position:
-            return position[0]["id"]
-        return None
-
-    def update_position(self, position: Position, amount: str, multiplier: int) -> None:
-        """
-        Updates a position in the database.
-        :param position: Position
-        :param amount: str
-        :param multiplier: int
-        :return: None
-        """
-        position.amount = amount
-        position.multiplier = multiplier
-        self.write_to_db(position)
-
-    def delete_position(self, position: Position) -> None:
-        """
-        Deletes a position from the database.
-        :param position: Position
-        :return: None
-        """
-        self.delete_object(Position, position.id)
-
-    def close_position(self, position_id: uuid) -> Position | None:
-        """
-        Retrieves a position by its contract address.
-        :param position_id: str
-        :return: Position | None
-        """
-        position = self.get_object(Position, position_id)
-        if position:
-            position.status = Status.CLOSED.value
-            self.write_to_db(position)
-        return position.status
-
-    def open_position(self, position_id: uuid.UUID, current_prices: dict) -> str | None:
-        """
-        Opens a position by updating its status and creating an AirDrop claim.
-        :param position_id: uuid.UUID
-        :param current_prices: dict
-        :return: str | None
-        """
-        position = self.get_object(Position, position_id)
-        if position:
-            position.status = Status.OPENED.value
-            self.write_to_db(position)
-            self.create_empty_claim(position.user_id)
-            self.save_current_price(position, current_prices)
-            return position.status
-        else:
-            logger.error(f"Position with ID {position_id} not found")
-            return None
-
-    def get_total_amounts_for_open_positions(self) -> dict[str, Decimal]: 
-        """ 
-        Calculates the amounts for all positions where status is 'OPENED', 
-        grouped by token symbol. 
-        
-        :return: Dictionary of total amounts for each token in opened positions 
-        """
-        with self.Session() as db:
-            try:
-                # Group by token symbol and sum amounts
-                token_amounts = (
-                    db.query(
-                        Position.token_symbol,
-                        func.sum(cast(Position.amount, Numeric)).label('total_amount')
+                try:
+                    positions = (
+                        db.query(Position)
+                        .filter(
+                            Position.user_id == user.id,
+                            Position.status == Status.OPENED.value,
+                        )
+                        .all()
                     )
-                    .filter(Position.status == Status.OPENED.value)
-                    .group_by(Position.token_symbol)
-                    .all()
-                )
-                # Convert to dictionary
-                return {token: Decimal(str(amount)) for token, amount in token_amounts}
-            
-            except SQLAlchemyError as e:
-                logger.error(f"Error calculating amounts for open positions: {e}")
-                return {}
 
-    def save_current_price(self, position: Position, price_dict: dict) -> None:
-        """
-        Saves current prices into db.
-        :return: None
-        """
-        start_price = price_dict.get(position.token_symbol)
-        try:
-            position.start_price = start_price
+                    # Convert positions to a list of dictionaries
+                    positions_dict = [
+                        self._position_to_dict(position) for position in positions
+                    ]
+                    return positions_dict
+
+                except SQLAlchemyError as e:
+                    logger.error(f"Failed to retrieve positions: {str(e)}")
+                    return []
+
+        def create_position(
+            self, wallet_id: str, token_symbol: str, amount: str, multiplier: int
+        ) -> Position:
+            """
+            Creates a new position in the database if it does not already exist for the wallet.
+            If a position with status 'pending' exists, update its values.
+            :param wallet_id: str
+            :param token_symbol: str
+            :param amount: str
+            :param multiplier: int
+            :return: Position
+            """
+            user = self._get_user_by_wallet_id(wallet_id)
+            if not user:
+                logger.error(f"User with wallet ID {wallet_id} not found")
+                return None
+
+            # Check if a position with status 'pending' already exists for this user
+            with self.Session() as session:
+                existing_position = (
+                    session.query(Position)
+                    .filter(
+                        Position.user_id == user.id, Position.status == Status.PENDING.value
+                    )
+                    .one_or_none()
+                )
+
+                # If a pending position exists, update its values
+                if existing_position:
+                    existing_position.token_symbol = token_symbol
+                    existing_position.amount = amount
+                    existing_position.multiplier = multiplier
+                    existing_position.start_price = PositionDBConnector.START_PRICE
+                    session.commit()  # Commit the changes to the database
+                    session.refresh(existing_position)  # Refresh to get updated values
+                    return existing_position
+
+                # Create a new position since none with 'pending' status exists
+                position = Position(
+                    user_id=user.id,
+                    token_symbol=token_symbol,
+                    amount=amount,
+                    multiplier=multiplier,
+                    status=Status.PENDING.value,  # Set status as 'pending' by default
+                    start_price=PositionDBConnector.START_PRICE,
+                )
+
+                # Write the new position to the database
+                position = self.write_to_db(position)
+                return position
+
+        def get_position_id_by_wallet_id(self, wallet_id: str) -> str | None:
+            """
+            Retrieves the position ID by the wallet ID.
+            :param wallet_id: wallet ID
+            :return: Position ID
+            """
+            position = self.get_positions_by_wallet_id(wallet_id)
+            if position:
+                return position[0]["id"]
+            return None
+
+        def update_position(self, position: Position, amount: str, multiplier: int) -> None:
+            """
+            Updates a position in the database.
+            :param position: Position
+            :param amount: str
+            :param multiplier: int
+            :return: None
+            """
+            position.amount = amount
+            position.multiplier = multiplier
             self.write_to_db(position)
-        except SQLAlchemyError as e:
-            logger.error(f"Error while saving current_price for position: {e}")
+
+        def delete_position(self, position: Position) -> None:
+            """
+            Deletes a position from the database.
+            :param position: Position
+            :return: None
+            """
+            self.delete_object(Position, position.id)
+
+        def close_position(self, position_id: uuid) -> Position | None:
+            """
+            Retrieves a position by its contract address.
+            :param position_id: str
+            :return: Position | None
+            """
+            position = self.get_object(Position, position_id)
+            if position:
+                position.status = Status.CLOSED.value
+                self.write_to_db(position)
+            return position.status
+
+        def open_position(self, position_id: uuid.UUID, current_prices: dict) -> str | None:
+            """
+            Opens a position by updating its status and creating an AirDrop claim.
+            :param position_id: uuid.UUID
+            :param current_prices: dict
+            :return: str | None
+            """
+            position = self.get_object(Position, position_id)
+            if position:
+                position.status = Status.OPENED.value
+                self.write_to_db(position)
+                self.create_empty_claim(position.user_id)
+                self.save_current_price(position, current_prices)
+                return position.status
+            else:
+                logger.error(f"Position with ID {position_id} not found")
+                return None
+
+        def get_total_amounts_for_open_positions(self) -> dict[str, Decimal]: 
+            """ 
+            Calculates the amounts for all positions where status is 'OPENED', 
+            grouped by token symbol. 
+            
+            :return: Dictionary of total amounts for each token in opened positions 
+            """
+            with self.Session() as db:
+                try:
+                    # Group by token symbol and sum amounts
+                    token_amounts = (
+                        db.query(
+                            Position.token_symbol,
+                            func.sum(cast(Position.amount, Numeric)).label('total_amount')
+                        )
+                        .filter(Position.status == Status.OPENED.value)
+                        .group_by(Position.token_symbol)
+                        .all()
+                    )
+                    # Convert to dictionary
+                    return {token: Decimal(str(amount)) for token, amount in token_amounts}
+                
+                except SQLAlchemyError as e:
+                    logger.error(f"Error calculating amounts for open positions: {e}")
+                    return {}
+
+        def save_current_price(self, position: Position, price_dict: dict) -> None:
+            """
+            Saves current prices into db.
+            :return: None
+            """
+            start_price = price_dict.get(position.token_symbol)
+            try:
+                position.start_price = start_price
+                self.write_to_db(position)
+            except SQLAlchemyError as e:
+                logger.error(f"Error while saving current_price for position: {e}")
 
 
 class AirDropDBConnector(DBConnector):
